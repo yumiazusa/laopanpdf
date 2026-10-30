@@ -199,11 +199,60 @@ def p(text, style=cell, raw=False):
     return Paragraph(value.replace("\n", "<br/>"), style)
 
 
-def build_pdf(data, output_path):
-    regular_font = os.environ.get("DAIMON_CJK_FONT_REGULAR")
-    bold_font = os.environ.get("DAIMON_CJK_FONT_BOLD")
-    if not regular_font or not bold_font:
-        raise RuntimeError("Daimon 中文字体不可用")
+def usable_font(path):
+    if not path:
+        return False
+    candidate = Path(path).expanduser()
+    if not candidate.is_file():
+        return False
+    try:
+        TTFont("LaopanpdfFontProbe", str(candidate))
+        return True
+    except Exception:
+        return False
+
+
+def resolve_fonts(regular=None, bold=None):
+    regular_explicit = regular or os.environ.get("LAOPANPDF_FONT_REGULAR") or os.environ.get("DAIMON_CJK_FONT_REGULAR")
+    bold_explicit = bold or os.environ.get("LAOPANPDF_FONT_BOLD") or os.environ.get("DAIMON_CJK_FONT_BOLD")
+    if regular_explicit:
+        if not usable_font(regular_explicit):
+            raise RuntimeError("指定的常规中文字体不可用：" + str(regular_explicit))
+        regular_font = str(Path(regular_explicit).expanduser().resolve())
+    else:
+        regular_candidates = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/STHeiti Light.ttc",
+            "/System/Library/Fonts/Supplemental/Songti.ttc",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "C:/Windows/Fonts/simsun.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+        ]
+        regular_font = next((path for path in regular_candidates if usable_font(path)), None)
+    if not regular_font:
+        raise RuntimeError("未找到可用中文字体，请用 --font-regular 指定 TrueType 中文字体")
+
+    if bold_explicit:
+        if not usable_font(bold_explicit):
+            raise RuntimeError("指定的粗体中文字体不可用：" + str(bold_explicit))
+        bold_font = str(Path(bold_explicit).expanduser().resolve())
+    else:
+        bold_candidates = [
+            "/System/Library/Fonts/PingFang.ttc",
+            "C:/Windows/Fonts/msyhbd.ttc",
+            "C:/Windows/Fonts/simhei.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        ]
+        bold_font = next((path for path in bold_candidates if usable_font(path)), regular_font)
+    return regular_font, bold_font
+
+
+def build_pdf(data, output_path, regular=None, bold=None):
+    regular_font, bold_font = resolve_fonts(regular, bold)
     pdfmetrics.registerFont(TTFont("DaimonCJK", regular_font))
     pdfmetrics.registerFont(TTFont("DaimonCJK-Bold", bold_font))
     pdfmetrics.registerFontFamily("DaimonCJK", normal="DaimonCJK", bold="DaimonCJK-Bold", italic="DaimonCJK", boldItalic="DaimonCJK-Bold")
@@ -421,6 +470,8 @@ def main():
     parser.add_argument("input", type=Path, help="保存的 cerDeclarePrint HTML 网页")
     parser.add_argument("-o", "--output", type=Path, help="输出 PDF 路径")
     parser.add_argument("--qa-dir", type=Path, help="逐页预览与联系表输出目录")
+    parser.add_argument("--font-regular", help="常规中文 TrueType 字体路径；默认自动检测")
+    parser.add_argument("--font-bold", help="粗体中文 TrueType 字体路径；默认自动检测或复用常规字体")
     args = parser.parse_args()
     input_path = args.input.expanduser().resolve()
     if not input_path.is_file():
@@ -428,7 +479,7 @@ def main():
     output = (args.output or input_path.with_name(input_path.stem + "_完整打印版.pdf")).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     data = parse_html(input_path)
-    build_pdf(data, output)
+    build_pdf(data, output, regular=args.font_regular, bold=args.font_bold)
     result = {"output": str(output), "case_no": data["case_no"]}
     if args.qa_dir:
         qa_dir = args.qa_dir.expanduser().resolve()

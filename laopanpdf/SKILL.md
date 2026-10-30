@@ -34,4 +34,5 @@ python3 "{skill_path}/scripts/laopanpdf.py" "<输入网页.html>" -o "<当前工
 
 - 解析脚本提示缺栏目或字段时，检查 HTML 是否完整、是否来自同一网站；不得静默省略内容。
 - 网站结构发生变化时，按实际 HTML 调整解析脚本并重新回归测试，不得硬编码当前样例数据。
-- 运行环境缺少 ReportLab、BeautifulSoup、pypdfium2、Pillow 或 Kimi 管理中文字体时，明确报告缺失项。
+- 缺少 Python 依赖时，使用 `python3 -m pip install -r "{skill_path}/requirements.txt"` 安装。
+- 字体会自动适配 macOS、Windows、Linux；自动检测失败时，用 `--font-regular` 和 `--font-bold` 指定可用中文 TrueType 字体，不得在未生成 PDF 时声称成功。

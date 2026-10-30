@@ -28,10 +28,31 @@
 python3 laopanpdf/scripts/laopanpdf.py input.html -o output.pdf --qa-dir qa
 ```
 
-依赖：Python 3、ReportLab、BeautifulSoup 4、pypdfium2、Pillow，以及 `DAIMON_CJK_FONT_REGULAR` 和 `DAIMON_CJK_FONT_BOLD` 指向的中文 TrueType 字体。Kimi Work 管理运行时已包含这些依赖。
+## 依赖与中文字体
+
+安装 Python 依赖：
+
+```bash
+python3 -m pip install -r laopanpdf/requirements.txt
+```
+
+脚本按以下顺序选择中文字体：
+
+1. 命令行参数 `--font-regular`、`--font-bold`。
+2. `LAOPANPDF_FONT_REGULAR`、`LAOPANPDF_FONT_BOLD` 或 Kimi Work 的 `DAIMON_CJK_FONT_REGULAR`、`DAIMON_CJK_FONT_BOLD`。
+3. 自动检测常见 macOS、Windows、Linux 中文字体；找不到粗体时复用常规字体。
+
+自动检测失败时手动指定：
+
+```bash
+python3 laopanpdf/scripts/laopanpdf.py input.html -o output.pdf \
+  --font-regular "/path/to/Chinese-Regular.ttf" \
+  --font-bold "/path/to/Chinese-Bold.ttf"
+```
 
 ## 文件
 
 - `laopanpdf/SKILL.md`：触发条件与执行规范。
 - `laopanpdf/scripts/laopanpdf.py`：网页解析、PDF 生成与逐页预览脚本。
+- `laopanpdf/requirements.txt`：跨平台 Python 依赖清单。
 - `laopanpdf.skill`：可移植安装包。
