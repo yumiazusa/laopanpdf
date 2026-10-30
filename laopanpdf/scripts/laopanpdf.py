@@ -165,6 +165,12 @@ def parse_html(input_path):
         "capital": {"headings": capital_headings, "rows": capitals, "summary": capital_summary_row[0]},
         "appraiser": {"headings": appraiser_headings, "rows": appraisers, "summary": appraiser_summary_row[0]},
         "project": {"headings": project_headings, "rows": projects, "summary": project_summary_row[0]},
+        "source_tables": {
+            "basic": basic_table,
+            "capital": capital_table,
+            "appraiser": appraiser_table,
+            "project": project_table,
+        },
         "intro_paragraphs": intro_paragraphs,
         "consent": consent,
     }
@@ -251,6 +257,183 @@ def resolve_fonts(regular=None, bold=None):
     return regular_font, bold_font
 
 
+def px_value(style, name):
+    match = re.search(r"(?:^|;)\s*" + re.escape(name) + r"\s*:\s*([0-9.]+)px", style or "")
+    return float(match.group(1)) if match else None
+
+
+def html_form_table(source):
+    """按 HTML 的实际网格重建表格，保留列宽、行高、合并单元格与边框。"""
+    html_rows = source.find_all("tr")
+    if not html_rows:
+        raise ValueError("网页表格没有行")
+
+    dimension_widths = None
+    first_cells = html_rows[0].find_all(["td", "th"], recursive=False)
+    if len(first_cells) > 1 and all(not clean(cell.get_text()) for cell in first_cells):
+        heights = [px_value(cell.get("style", ""), "height") for cell in first_cells]
+        widths = [px_value(cell.get("style", ""), "width") for cell in first_cells]
+        if all(height is not None and height <= 2 for height in heights) and all(widths):
+            dimension_widths = widths
+            html_rows = html_rows[1:]
+
+    covered = {}
+    entries = {}
+    row_heights = {}
+    spans = []
+    column_count = 0
+    for row_index, tr in enumerate(html_rows):
+        heights = [px_value(cell.get("style", ""), "height") for cell in tr.find_all(["td", "th"], recursive=False)]
+        heights = [height for height in heights if height is not None]
+        if tr.get("height"):
+            try:
+                heights.append(float(tr["height"].replace("px", "")))
+            except ValueError:
+                pass
+        row_heights[row_index] = max(heights) if heights else None
+        column = 0
+        for html_cell in tr.find_all(["td", "th"], recursive=False):
+            while (row_index, column) in covered:
+                column += 1
+            colspan = max(1, int(html_cell.get("colspan", 1)))
+            rowspan = max(1, int(html_cell.get("rowspan", 1)))
+            anchor = (row_index, column)
+            entries[anchor] = html_cell
+            if colspan > 1 or rowspan > 1:
+                spans.append((anchor, rowspan, colspan))
+            for rr in range(row_index, row_index + rowspan):
+                for cc in range(column, column + colspan):
+                    covered[(rr, cc)] = anchor
+                    column_count = max(column_count, cc + 1)
+            column += colspan
+
+    def anchor_has_content(anchor):
+        html_cell = entries[anchor]
+        style = html_cell.get("style", "")
+        return bool(clean(html_cell.get_text()) or "border" in style)
+
+    kept_rows = []
+    for row_index in range(len(html_rows)):
+        anchors = {covered[(row_index, column)] for column in range(column_count) if (row_index, column) in covered}
+        text = clean(" ".join(entries[anchor].get_text(" ", strip=True) for anchor in anchors))
+        bordered = any("border" in entries[anchor].get("style", "") for anchor in anchors)
+        if "卷宗号" in text and not bordered:
+            continue
+        if not text and not any(anchor_has_content(anchor) for anchor in anchors):
+            continue
+        kept_rows.append(row_index)
+    if not kept_rows:
+        raise ValueError("网页表格没有可打印内容")
+
+    used_columns = []
+    for column in range(column_count):
+        anchors = {covered[(row, column)] for row in kept_rows if (row, column) in covered}
+        if any(anchor_has_content(anchor) for anchor in anchors):
+            used_columns.append(column)
+    if not used_columns:
+        raise ValueError("网页表格没有可打印列")
+    first_column, last_column = used_columns[0], used_columns[-1]
+    selected_columns = list(range(first_column, last_column + 1))
+    row_map = {old: new for new, old in enumerate(kept_rows)}
+    column_map = {old: new for new, old in enumerate(selected_columns)}
+
+    if dimension_widths:
+        widths = dimension_widths[first_column:last_column + 1]
+        scale = CONTENT_W / sum(widths)
+    else:
+        widths = [0.0] * len(selected_columns)
+        for (row, column), html_cell in entries.items():
+            if row not in row_map or column not in column_map:
+                continue
+            style = html_cell.get("style", "")
+            width = px_value(style, "width")
+            if width is None and html_cell.get("width"):
+                try:
+                    width = float(str(html_cell["width"]).replace("px", "").replace("%", ""))
+                except ValueError:
+                    width = None
+            if width:
+                colspan = max(1, int(html_cell.get("colspan", 1)))
+                share = width / colspan
+                for offset in range(colspan):
+                    mapped = column_map.get(column + offset)
+                    if mapped is not None:
+                        widths[mapped] = max(widths[mapped], share)
+        fallback = next((width for width in widths if width), 1.0)
+        widths = [width or fallback for width in widths]
+        scale = 0.85
+    width_total = sum(widths)
+    widths = [CONTENT_W * width / width_total for width in widths]
+
+    cooked = []
+    paragraphs = {}
+    commands = [
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+    ]
+    for new_row, old_row in enumerate(kept_rows):
+        cooked_row = []
+        for new_column, old_column in enumerate(selected_columns):
+            anchor = covered.get((old_row, old_column))
+            if anchor != (old_row, old_column):
+                cooked_row.append("")
+                continue
+            html_cell = entries[anchor]
+            style_text = html_cell.get("style", "")
+            descendants = " ".join(tag.get("style", "") for tag in html_cell.find_all(style=True))
+            all_styles = style_text + ";" + descendants
+            font_px = px_value(all_styles, "font-size") or 14
+            font_size = max(7.2, min(16, font_px * 0.75 * scale))
+            align = TA_CENTER
+            align_match = re.search(r"text-align\s*:\s*(left|right|center|justify)", all_styles)
+            if align_match:
+                align = {"left": TA_LEFT, "justify": TA_LEFT, "right": TA_RIGHT, "center": TA_CENTER}[align_match.group(1)]
+            bold = "font-weight: bold" in all_styles or "font-weight:bold" in all_styles or html_cell.find(["b", "strong"])
+            paragraph_style = make_style(
+                "html_{}_{}".format(new_row, new_column), font_size, font_size * 1.35, align, bold=bool(bold)
+            )
+            paragraph = p(clean(html_cell.get_text(" ", strip=True)), paragraph_style)
+            paragraphs[(new_row, new_column)] = paragraph
+            cooked_row.append(paragraph)
+            rowspan, colspan = next(((rs, cs) for a, rs, cs in spans if a == anchor), (1, 1))
+            cell_start = (new_column, new_row)
+            cell_end = (new_column + colspan - 1, new_row + rowspan - 1)
+            valign = str(html_cell.get("valign", "middle")).lower()
+            commands.append(("VALIGN", cell_start, cell_end, valign if valign in {"top", "middle", "bottom"} else "middle"))
+        cooked.append(cooked_row)
+
+    for anchor, rowspan, colspan in spans:
+        row, column = anchor
+        if row not in row_map or column not in column_map:
+            continue
+        end_row = row + rowspan - 1
+        end_column = column + colspan - 1
+        if end_row not in row_map or end_column not in column_map:
+            continue
+        start = (column_map[column], row_map[row])
+        end = (column_map[end_column], row_map[end_row])
+        commands.append(("SPAN", start, end))
+    commands += [("GRID", (0, 0), (-1, -1), 0.55, colors.black), ("BOX", (0, 0), (-1, -1), 1.1, colors.black)]
+
+    heights = []
+    for new_row, old_row in enumerate(kept_rows):
+        source_height = row_heights.get(old_row)
+        required = 0.0
+        for (row, column), paragraph in paragraphs.items():
+            if row != new_row:
+                continue
+            anchor = (old_row, selected_columns[column])
+            _, colspan = next(((rs, cs) for a, rs, cs in spans if a == anchor), (1, 1))
+            available = sum(widths[column:column + colspan]) - 6
+            _, content_height = paragraph.wrap(max(1, available), 1000)
+            required = max(required, content_height + 6)
+        heights.append(max(required, source_height * scale if source_height else 0))
+
+    table = Table(cooked, colWidths=widths, rowHeights=heights, hAlign="CENTER")
+    table.setStyle(TableStyle(commands))
+    return table
+
+
 def build_pdf(data, output_path, regular=None, bold=None):
     regular_font, bold_font = resolve_fonts(regular, bold)
     pdfmetrics.registerFont(TTFont("DaimonCJK", regular_font))
@@ -262,47 +445,6 @@ def build_pdf(data, output_path, regular=None, bold=None):
         table.setStyle(TableStyle([
             ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ]))
-        return table
-
-    def section_title(text):
-        table = Table([[p(text, section_style)]], colWidths=[CONTENT_W])
-        table.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 1.1, colors.black),
-            ("LEFTPADDING", (0, 0), (-1, -1), 5), ("RIGHTPADDING", (0, 0), (-1, -1), 5),
-            ("TOPPADDING", (0, 0), (-1, -1), 7), ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
-        ]))
-        return table
-
-    def form_table(rows, widths, header_rows=0, small=False):
-        cooked = []
-        for r, row in enumerate(rows):
-            cooked_row = []
-            for c, value in enumerate(row):
-                style = cell_small if small else cell
-                if r < header_rows:
-                    style = make_style("th", 8.8 if small else 9.4, 12 if small else 13)
-                cooked_row.append(value if hasattr(value, "wrap") else p(value, style))
-            cooked.append(cooked_row)
-        table = Table(cooked, colWidths=widths, hAlign="CENTER", repeatRows=header_rows)
-        commands = [
-            ("GRID", (0, 0), (-1, -1), 0.6, colors.black),
-            ("BOX", (0, 0), (-1, -1), 1.1, colors.black),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 4), ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-            ("TOPPADDING", (0, 0), (-1, -1), 6), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-        ]
-        if header_rows:
-            commands.append(("LINEBELOW", (0, header_rows - 1), (-1, header_rows - 1), 0.8, colors.black))
-        table.setStyle(TableStyle(commands))
-        return table
-
-    def summary_table(text, height=None):
-        table = Table([[p(text, cell_left)]], colWidths=[CONTENT_W], rowHeights=[height] if height else None)
-        table.setStyle(TableStyle([
-            ("BOX", (0, 0), (-1, -1), 1.1, colors.black), ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 8), ("RIGHTPADDING", (0, 0), (-1, -1), 8),
-            ("TOPPADDING", (0, 0), (-1, -1), 8), ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
         ]))
         return table
 
@@ -339,61 +481,11 @@ def build_pdf(data, output_path, regular=None, bold=None):
     story += [p("企业法定代表人：（签字）____________________（公章）", make_style("signature", 11, 22, TA_RIGHT))]
     story += [Spacer(1, 10 * mm), p("________年________月________日", make_style("date", 11, 22, TA_RIGHT)), PageBreak()]
 
-    # 3. 基本情况、备案情况、负责人情况
-    basic = data["basic"]
-    story += [case_header(), section_title("基 本 情 况")]
-    def expand_pair_row(row):
-        if len(row) == 6:
-            return row
-        if len(row) == 4:
-            return [row[0], row[1], "", row[2], row[3], ""]
-        raise ValueError("基本情况行的单元格数量异常：" + "｜".join(row))
-
-    legal = expand_pair_row(basic["legal_row"])
-    office = expand_pair_row(basic["office_row"])
-    registration = expand_pair_row(basic["registration_row"])
-    capital = expand_pair_row(basic["capital_row"])
-    basic_rows = [
-        ["机构名称", basic["company"], "", "", "", ""],
-        legal,
-        office,
-        registration,
-        capital,
-        ["经营范围", basic["scope"], "", "", "", ""],
-    ]
-    basic_table = form_table(basic_rows, [82, 85, 85, 74, 74, CONTENT_W - 400])
-    basic_table.setStyle(TableStyle([
-        ("SPAN", (1, 0), (5, 0)), ("SPAN", (1, 2), (2, 2)), ("SPAN", (4, 2), (5, 2)),
-        ("SPAN", (1, 3), (2, 3)), ("SPAN", (4, 3), (5, 3)), ("SPAN", (1, 4), (2, 4)),
-        ("SPAN", (4, 4), (5, 4)), ("SPAN", (1, 5), (5, 5)),
-    ]))
-    story += [basic_table, Spacer(1, 5 * mm), section_title("申报前房地产估价机构备案情况")]
-    level = basic["record_level_row"]
-    dates = basic["record_date_row"]
-    record_rows = [
-        level,
-        [dates[0], dates[1], dates[2], dates[3]],
-        ["", "", dates[4], dates[5]],
-    ]
-    record = form_table(record_rows, [130, 80, 105, CONTENT_W - 315], small=True)
-    record.setStyle(TableStyle([("SPAN", (0, 1), (0, 2)), ("SPAN", (1, 1), (1, 2))]))
-    story += [record, Spacer(1, 5 * mm), section_title("机构主要负责人及各部门负责人情况（不含兼职人员）")]
-    story += [form_table([basic["manager_headings"]] + basic["managers"], [48, 36, 48, 90, 60, 62, 45, CONTENT_W - 389], header_rows=1, small=True), PageBreak()]
-
-    # 4. 出资情况
-    story += [case_header(), section_title("出 资 情 况")]
-    story += [form_table([data["capital"]["headings"]] + data["capital"]["rows"], [50, 40, 125, 85, 65, 50, CONTENT_W - 415], header_rows=1, small=True)]
-    story += [summary_table(data["capital"]["summary"]), PageBreak()]
-
-    # 5. 估价师情况
-    story += [case_header(), section_title("估 价 师 情 况")]
-    story += [form_table([data["appraiser"]["headings"]] + data["appraiser"]["rows"], [50, 36, 45, 82, 128, 75, CONTENT_W - 416], header_rows=1, small=True)]
-    story += [summary_table(data["appraiser"]["summary"], height=70), PageBreak()]
-
-    # 6. 代表性估价项目
-    story += [case_header()]
-    story += [form_table([data["project"]["headings"]] + data["project"]["rows"], [110, 85, 45, 45, 57, 57, 58, CONTENT_W - 457], header_rows=1, small=True)]
-    story += [summary_table(data["project"]["summary"], height=75), PageBreak()]
+    # 3～6. 直接保留网页表格的字段、行列、合并关系及边框。
+    story += [case_header(), html_form_table(data["source_tables"]["basic"]), PageBreak()]
+    story += [case_header(), html_form_table(data["source_tables"]["capital"]), PageBreak()]
+    story += [case_header(), html_form_table(data["source_tables"]["appraiser"]), PageBreak()]
+    story += [case_header(), html_form_table(data["source_tables"]["project"]), PageBreak()]
 
     # 7. 机构简介与意见栏
     story += [case_header()]
